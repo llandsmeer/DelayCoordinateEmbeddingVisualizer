@@ -3,9 +3,8 @@ import numpy as np
 from OpenGL import GL, GLU
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-x = np.linspace(0, 100, 10000)
-y = (np.sin(x) + np.sin(x/3) * 0.4) * np.exp(-x/40)
-position_data = y.astype('float32')
+import lorenz
+from data_form import DataFormDialog
 
 vertex_shader = (GL.GL_VERTEX_SHADER, '''
     #version 150
@@ -46,10 +45,12 @@ fragment_shader = (GL.GL_FRAGMENT_SHADER, '''
     out vec4 color;
 
     void main() {
-        float factor = clamp(gl_FragCoord.z/2+0.5, 0, 1);
-        vec4 fore = vec4(0.0, 0.6, 1.0, 1.0);
-        vec4 black = vec4(0.0, 0.0, 0.0, 1.0);
-        color = mix(fore, black, factor);
+        float factor = clamp(exp(-(gl_FragCoord.z+2)/1), 0, 1.0);
+        //vec4 back = vec4(0.0, 7.0, 1.0, 1.0);
+        //vec4 fore = vec4(1.0, 0.5, 0.0, 1.0);
+        vec4 fore = vec4(0.0, 7.0, 1.0, 1.0);
+        vec4 back = vec4(0.0, 0.0, 0.3, 1.0);
+        color = mix(back, fore, factor);
     }
 ''')
 
@@ -93,30 +94,55 @@ class Window(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.widget = Widget()
+        color = self.palette().color(QtGui.QPalette.Background)
+        self.widget.bgcolor = color
         layout = QtWidgets.QHBoxLayout()
         layout.addWidget(self.widget)
         formwidget = QtWidgets.QWidget()
         form = QtWidgets.QVBoxLayout()
         form.setAlignment(QtCore.Qt.AlignTop)
-        formwidget.setMaximumWidth(150)
+        formwidget.setMaximumWidth(200)
         formwidget.setLayout(form)
         layout.addWidget(formwidget)
-        form.addWidget(QtWidgets.QLabel('Embedding 1'))
+        self.embed1label = QtWidgets.QLabel('Embedding 1 [0]')
+        form.addWidget(self.embed1label)
         self.embed1 = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.embed1.valueChanged.connect(self.propchanged)
         form.addWidget(self.embed1)
-        form.addWidget(QtWidgets.QLabel('Embedding 2'))
+        self.embed2label = QtWidgets.QLabel('Embedding 2 [0]')
+        form.addWidget(self.embed2label)
         self.embed2 = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.embed2.valueChanged.connect(self.propchanged)
         form.addWidget(self.embed2)
+        form.addWidget(QtWidgets.QLabel('Point Size'))
+        self.ps = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.ps.valueChanged.connect(self.propchanged)
+        form.addWidget(self.ps)
+        self.ps.setValue(1)
         self.setLayout(layout)
-        self.embed1.setMaximum(1000)
-        self.embed2.setMaximum(1000)
+        self.embed1.setMaximum(100)
+        self.embed2.setMaximum(100)
+        self.ps.setMinimum(1)
+        self.ps.setMaximum(15)
+        self.btnload = QtWidgets.QPushButton('Load Data')
+        self.btnload.clicked.connect(self.on_click_load)
+        form.addWidget(self.btnload)
+        self.load_data_dialog = DataFormDialog()
+        formwidget.palette().setColor(QtGui.QPalette.Background, QtCore.Qt.transparent)
+
+    def on_click_load(self):
+        if self.load_data_dialog.exec() == QtWidgets.QDialog.Accepted:
+            data = self.load_data_dialog.col
+            self.embed1.setMaximum(len(data)//10)
+            self.embed2.setMaximum(len(data)//10)
+            self.widget.load_data(data)
 
     def propchanged(self):
         self.widget.t1 = self.embed1.value()
         self.widget.t2 = self.embed2.value()
-        print(self.widget.t1, self.widget.t2)
+        self.widget.ps = self.ps.value()
+        self.embed1label.setText(f'Embedding 1 [{-self.widget.t1}]')
+        self.embed2label.setText(f'Embedding 2 [{-self.widget.t2}]')
 
 
 class Widget(QtWidgets.QOpenGLWidget):
@@ -134,6 +160,9 @@ class Widget(QtWidgets.QOpenGLWidget):
         self.tick = 0
         self.t1 = self.t2 = 0
         self.q = 0
+        y = lorenz.lorenz(num_steps=2000000)
+        self.data = y.astype('float32')
+        self.newdata = False
 
     def update_tick(self):
         self.tick += 1
@@ -142,6 +171,14 @@ class Widget(QtWidgets.QOpenGLWidget):
 
     def log_debug_message(self, msg):
         print(msg.message())
+
+    def load_data(self, data):
+        data = np.array(data).astype('float32')
+        data = (data - data.min()) / (data.max() - data.min())
+        data = 2*data - 1
+        data = data * 2
+        self.data = data
+        self.newdata = True
 
     def initializeGL(self):
         self.makeCurrent()
@@ -152,21 +189,27 @@ class Widget(QtWidgets.QOpenGLWidget):
         self.logger.startLogging()
         draw_program = build_draw_program(vertex_shader, fragment_shader)
         GL.glUseProgram(draw_program)
-        attach(draw_program, 'position', position_data)
-        GL.glPointSize(10)
+        attach(draw_program, 'position', self.data)
+        GL.glPointSize(self.ps)
         self.attr_t1 = GL.glGetUniformLocation(draw_program, 't1')
         self.attr_t2 = GL.glGetUniformLocation(draw_program, 't2')
         self.attr_q = GL.glGetUniformLocation(draw_program, 'q')
         GL.glEnable(GL.GL_DEPTH_TEST)
+        c = self.bgcolor
+        GL.glClearColor(c.red() / 0xff, c.green() / 0xff, c.blue() / 0xff, 1.0)
 
     def paintGL(self):
+        if self.newdata:
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, self.data, GL.GL_STATIC_DRAW)
+            self.newdata = False
         GL.glClear(GL.GL_COLOR_BUFFER_BIT |
                    GL.GL_DEPTH_BUFFER_BIT |
                    GL.GL_STENCIL_BUFFER_BIT)
         GL.glUniform1i(self.attr_t1, self.t1)
         GL.glUniform1i(self.attr_t2, self.t2)
         GL.glUniform1f(self.attr_q, self.q)
-        GL.glDrawArrays(GL.GL_POINTS, 0, len(y)-max(self.t1, self.t2))
+        GL.glPointSize(self.ps)
+        GL.glDrawArrays(GL.GL_POINTS, 0, len(self.data)-max(self.t1, self.t2))
         GL.glFlush()
         self.ctx.swapBuffers(self.ctx.surface())
 
